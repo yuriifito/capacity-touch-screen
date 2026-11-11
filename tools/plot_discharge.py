@@ -78,7 +78,10 @@ class Reader(threading.Thread):
         ts, mvs, in_burst, charged = [], [], False, None
         while True:
             line = ser.readline().decode(errors="ignore").strip()
-            if not line or line.startswith("#"):
+            if not line:
+                continue
+            if line.startswith("#"):
+                print(line)  # status / DC leak test messages from the board
                 continue
             if line.startswith("B"):
                 ts, mvs, in_burst = [], [], True
@@ -125,7 +128,8 @@ def main():
     p_v.setYRange(0, 3400)
     p_v.showGrid(x=True, y=True, alpha=0.3)
     p_v.addLine(y=THRESHOLD_MV, pen=pg.mkPen("gray", style=QtCore.Qt.PenStyle.DashLine))
-    curve = p_v.plot(pen=pg.mkPen("#1f77b4", width=2))
+    curve = p_v.plot(pen=pg.mkPen("#1f77b4", width=2),
+                     symbol="o", symbolSize=5, symbolBrush="#1f77b4")  # show every sample
 
     p_t = win.addPlot(row=1, col=0, title=f"Time to fall below {THRESHOLD_MV} mV")
     p_t.setLabel("bottom", "burst #")
@@ -148,6 +152,7 @@ def main():
         ts, mvs, charged = latest
         dt = ts[-1] / max(len(ts) - 1, 1)
         curve.setData([t / 1000 for t in ts], mvs)
+        p_v.setXRange(0, ts[-1] / 1000, padding=0.02)  # always fit the whole burst
         p_v.setTitle(f"Discharge curve (latest burst) | while charging: {charged} mV"
                      f" | {dt:.0f} µs/sample")
         hist.setData([t / 1000 for t in times])

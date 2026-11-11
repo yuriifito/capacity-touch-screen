@@ -47,6 +47,32 @@ static void sendBurst() {
   Serial.print("E\n");
 }
 
+// DC leak test: pin is HIGH forever, node settles at the divider voltage
+//   V = V_HIGH * R_leak / (R + R_leak)  ->  R_leak = R * V / (V_HIGH - V)
+static void dcLeakTest() {
+  uint64_t sum = 0;
+  int saturated = 0;
+  const int n = 200;
+  for (int i = 0; i < n; i++) {
+    if (analogRead(SENSE_PIN) >= 4090) saturated++;
+    sum += analogReadMilliVolts(SENSE_PIN);  // calibrated mV
+    // Slow sampling on purpose: every conversion pulls a little charge from the
+    // node, and through a megaohm resistor fast sampling would itself look like a leak.
+    delay(1);
+  }
+  const double v = (double)sum / n;
+  Serial.printf("# DC: node = %.0f mV", v);
+  if (saturated > n / 2) {
+    Serial.print("  ->  ADC at its top limit (node > ~3.1 V): leak too small to see"
+                 " with this R; use a bigger R_SERIES\n");
+  } else if (v < V_HIGH_MV - 30) {
+    const double r_leak = (double)R_SERIES_OHMS * v / (V_HIGH_MV - v);
+    Serial.printf("  ->  R_leak ~ %.2f MOhm\n", r_leak / 1e6);
+  } else {
+    Serial.print("  ->  no measurable leak (node ~ V_HIGH)\n");
+  }
+}
+
 void setup() {
   Serial.begin(SERIAL_BAUD);
 
@@ -61,6 +87,12 @@ void setup() {
 }
 
 void loop() {
+#if DC_LEAK_TEST
+  digitalWrite(CHARGE_PIN, HIGH);
+  dcLeakTest();
+  delay(500);
+  return;
+#endif
   captureDischarge();
   sendBurst();
   delay(CYCLE_PERIOD_MS);

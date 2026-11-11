@@ -25,10 +25,20 @@
 #define CHARGE_PIN  5
 
 // ---- Measurement -----------------------------------------------------------
-#define CHARGE_TIME_US     5000   // hold HIGH this long; must be >= 5*R*C to reach 3.3 V
-#define NUM_SAMPLES        400    // ADC samples captured per discharge
+// Pick these from tau = R*C (now R = 1 MOhm, C = 160 pF -> tau = 160 us).
+// One ADC sample takes ~61 us.
+#define CHARGE_TIME_US     1000   // >= 5*tau, so C reaches ~3.3 V
+#define NUM_SAMPLES        20     // ~20 * 61 us = 1.2 ms ~ 7*tau: whole decay visible
 #define SAMPLE_INTERVAL_US 0      // extra delay between samples (0 = as fast as possible)
-#define CYCLE_PERIOD_MS    50     // pause between charge/discharge cycles
+#define CYCLE_PERIOD_MS    20     // pause between charge/discharge cycles
+
+// ---- DC leak test ----------------------------------------------------------
+// 1 = keep CHARGE_PIN HIGH all the time and print the steady node voltage
+//     plus the estimated leak resistance (no discharge curves).
+// 0 = normal charge/discharge measurement.
+#define DC_LEAK_TEST   0
+#define R_SERIES_OHMS  1000000UL  // the resistor between CHARGE_PIN and the node
+#define V_HIGH_MV      3300       // CHARGE_PIN HIGH level (measure it with a multimeter)
 
 // ---- Serial ----------------------------------------------------------------
 #define SERIAL_BAUD 921600
