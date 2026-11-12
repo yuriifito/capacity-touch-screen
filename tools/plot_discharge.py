@@ -11,6 +11,9 @@ Close the serial monitor in VS Code first - only one program can open the port.
 """
 import argparse
 import csv
+import os
+import signal
+import sys
 import threading
 import time
 
@@ -43,6 +46,7 @@ def discharge_time(ts, mvs, threshold):
 class Reader(threading.Thread):
     def __init__(self, port, csv_path):
         super().__init__(daemon=True)
+        self.stop_event = threading.Event()
         self.port = port         # None -> auto-detect on every (re)connect
         self.status = "connecting..."
         self.lock = threading.Lock()
@@ -52,13 +56,13 @@ class Reader(threading.Thread):
         self.arrivals = []       # PC time of recent bursts, for the update rate
         self.csv = None
         if csv_path:
-            f = open(csv_path, "w", newline="")
-            self.csv = csv.writer(f)
+            self.csv_file = open(csv_path, "w", newline="")
+            self.csv = csv.writer(self.csv_file)
             self.csv.writerow(["burst", "pc_time_s", "t_us", "mV"])
 
     def run(self):
         # Survive unplugging / board resets / re-uploads: reconnect forever.
-        while True:
+        while not self.stop_event.is_set():
             port = self.port or find_port()
             if port is None:
                 self.status = "no serial port found - plug the board in"
@@ -75,8 +79,8 @@ class Reader(threading.Thread):
                 time.sleep(1)
 
     def read_loop(self, ser):
-        ts, mvs, in_burst, charged = [], [], False, None
-        while True:
+        ts, mvs, in_burst, charged, expected = [], [], False, None, 0
+        while not self.stop_event.is_set():
             line = ser.readline().decode(errors="ignore").strip()
             if not line:
                 continue
@@ -84,11 +88,23 @@ class Reader(threading.Thread):
                 print(line)  # status / DC leak test messages from the board
                 continue
             if line.startswith("B"):
+                # Header "B <count> [<mV while charging>]". Lines can arrive
+                # damaged (e.g. right after connecting) - drop anything malformed.
+                try:
+                    parts = [int(p) for p in line.split()[1:]]
+                except ValueError:
+                    in_burst = False
+                    continue
+                if not 1 <= len(parts) <= 2:
+                    in_burst = False
+                    continue
+                expected = parts[0]
+                charged = parts[1] if len(parts) == 2 else None
                 ts, mvs, in_burst = [], [], True
-                parts = line.split()
-                charged = int(parts[2]) if len(parts) > 2 else None
             elif line == "E" and in_burst:
                 in_burst = False
+                if len(ts) != expected:
+                    continue  # some sample lines were lost - skip this burst
                 td = discharge_time(ts, mvs, THRESHOLD_MV)
                 with self.lock:
                     self.latest = (ts, mvs, charged)
@@ -133,7 +149,10 @@ def main():
 
     p_t = win.addPlot(row=1, col=0, title=f"Time to fall below {THRESHOLD_MV} mV")
     p_t.setLabel("bottom", "burst #")
-    p_t.setLabel("left", "discharge time, ms")
+    p_t.setLabel("left", "discharge time, µs")
+    p_t.getAxis("left").enableAutoSIPrefix(False)
+    p_v.getAxis("left").enableAutoSIPrefix(False)
+    p_v.getAxis("bottom").enableAutoSIPrefix(False)
     p_t.showGrid(x=True, y=True, alpha=0.3)
     hist = p_t.plot(pen=pg.mkPen("#d62728", width=2))
     win.show()
@@ -155,15 +174,32 @@ def main():
         p_v.setXRange(0, ts[-1] / 1000, padding=0.02)  # always fit the whole burst
         p_v.setTitle(f"Discharge curve (latest burst) | while charging: {charged} mV"
                      f" | {dt:.0f} µs/sample")
-        hist.setData([t / 1000 for t in times])
+        hist.setData(times)  # µs
 
     timer = QtCore.QTimer()
     timer.timeout.connect(update)
     timer.start(20)
-    try:
-        app.exec()
-    except KeyboardInterrupt:
-        pass
+
+    # Ctrl+C in the terminal: Qt's C++ loop blocks Python's default handler,
+    # so install our own that closes the window. The 20 ms timer above keeps
+    # returning control to Python, which lets the handler run promptly.
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    app.exec()
+
+    # Orderly shutdown: stop the GUI timer, let the serial thread finish its
+    # current readline (timeout=1 s) and close the port, then save the CSV.
+    timer.stop()
+    reader.stop_event.set()
+    reader.join(timeout=2)
+
+    if reader.csv:
+        reader.csv_file.close()  # flush everything recorded so far
+        print(f"saved {args.csv}")
+    print(f"stopped after {reader.bursts} bursts")
+    # Skip Python's interpreter teardown: destroying PyQt6/pyqtgraph objects
+    # in random order at exit is what segfaulted. Everything is saved by now.
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
