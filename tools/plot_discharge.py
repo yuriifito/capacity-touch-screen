@@ -25,6 +25,7 @@ from pyqtgraph.Qt import QtCore
 BAUD = 921600          # must match SERIAL_BAUD in include/config.h
 THRESHOLD_MV = 1200    # level used to measure "discharge time"
 HISTORY = 200          # how many discharge times to keep in the lower plot
+SMOOTH = 8             # default moving-average window (bursts) for the filtered line
 
 
 def find_port():
@@ -32,6 +33,18 @@ def find_port():
         if any(k in (p.description or "") for k in ("CP210", "CH34", "USB", "JTAG")):
             return p.device
     return None
+
+
+def moving_average(xs, n):
+    """Trailing moving average: point i = mean of the last n values up to i.
+    Noise drops ~sqrt(n) times; a step (touch) shows up after ~n bursts."""
+    out, acc = [], 0.0
+    for i, x in enumerate(xs):
+        acc += x
+        if i >= n:
+            acc -= xs[i - n]
+        out.append(acc / min(i + 1, n))
+    return out
 
 
 def discharge_time(ts, mvs, threshold):
@@ -51,7 +64,8 @@ class Reader(threading.Thread):
         self.status = "connecting..."
         self.lock = threading.Lock()
         self.latest = None       # (ts, mvs, charged_mV)
-        self.times = []          # discharge time history
+        self.times = []          # discharge time history (or touchRead values)
+        self.mode = "rc"         # "rc" = discharge curves, "touch" = touchRead()
         self.bursts = 0
         self.arrivals = []       # PC time of recent bursts, for the update rate
         self.csv = None
@@ -87,6 +101,20 @@ class Reader(threading.Thread):
             if line.startswith("#"):
                 print(line)  # status / DC leak test messages from the board
                 continue
+            if line.startswith("T"):
+                # "T <value>" from TOUCH_READ_TEST mode
+                try:
+                    value = int(line.split()[1])
+                except (ValueError, IndexError):
+                    continue
+                with self.lock:
+                    self.mode = "touch"
+                    self.bursts += 1
+                    self.arrivals = (self.arrivals + [time.monotonic()])[-20:]
+                    self.times = (self.times + [value])[-HISTORY:]
+                if self.csv:
+                    self.csv.writerow([self.bursts, time.time(), "", value])
+                continue
             if line.startswith("B"):
                 # Header "B <count> [<mV while charging>]". Lines can arrive
                 # damaged (e.g. right after connecting) - drop anything malformed.
@@ -107,6 +135,9 @@ class Reader(threading.Thread):
                     continue  # some sample lines were lost - skip this burst
                 td = discharge_time(ts, mvs, THRESHOLD_MV)
                 with self.lock:
+                    if self.mode != "rc":
+                        self.times = []  # switched back from touch mode
+                    self.mode = "rc"
                     self.latest = (ts, mvs, charged)
                     self.bursts += 1
                     self.arrivals = (self.arrivals + [time.monotonic()])[-20:]
@@ -128,6 +159,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("port", nargs="?")
     ap.add_argument("--csv", help="save every sample to this CSV file")
+    ap.add_argument("--smooth", type=int, default=SMOOTH,
+                    help=f"moving-average window for the filtered line (default {SMOOTH})")
     args = ap.parse_args()
 
     reader = Reader(args.port, args.csv)
@@ -154,27 +187,49 @@ def main():
     p_v.getAxis("left").enableAutoSIPrefix(False)
     p_v.getAxis("bottom").enableAutoSIPrefix(False)
     p_t.showGrid(x=True, y=True, alpha=0.3)
-    hist = p_t.plot(pen=pg.mkPen("#d62728", width=2))
+    p_t.addLegend(offset=(10, 10))
+    hist = p_t.plot(pen=pg.mkPen((214, 39, 40, 140), width=1), name="raw")
+    hist_f = p_t.plot(pen=pg.mkPen("#1f1f1f", width=3),
+                      name=f"moving average, {args.smooth} bursts")
     win.show()
 
     last_burst = [-1]
+    shown_mode = [None]
+
+    def set_mode(mode):
+        if mode == "touch":
+            p_t.setTitle("touchRead(): ESP32-S3 hardware touch sensor (finger → goes up)")
+            p_t.setLabel("left", "touchRead value, counts")
+            p_t.setLabel("bottom", "measurement #")
+            p_v.setTitle("TOUCH_READ_TEST mode: no discharge curve")
+            curve.setData([], [])
+        else:
+            p_t.setTitle(f"Time to fall below {THRESHOLD_MV} mV")
+            p_t.setLabel("left", "discharge time, µs")
+            p_t.setLabel("bottom", "burst #")
+        shown_mode[0] = mode
 
     def update():
         with reader.lock:
             latest, times = reader.latest, list(reader.times)
-            bursts, arrivals = reader.bursts, list(reader.arrivals)
+            bursts, arrivals, mode = reader.bursts, list(reader.arrivals), reader.mode
         rate = (len(arrivals) - 1) / (arrivals[-1] - arrivals[0]) if len(arrivals) > 1 else 0
-        win.setWindowTitle(f"{reader.status} | {rate:.1f} bursts/s")
-        if bursts == last_burst[0] or latest is None:
+        win.setWindowTitle(f"{reader.status} | {rate:.1f} measurements/s")
+        if bursts == last_burst[0]:
             return  # nothing new - don't redraw
         last_burst[0] = bursts
+        if mode != shown_mode[0]:
+            set_mode(mode)
+        hist.setData(times)
+        hist_f.setData(moving_average(times, max(args.smooth, 1)))
+        if mode == "touch" or latest is None:
+            return
         ts, mvs, charged = latest
         dt = ts[-1] / max(len(ts) - 1, 1)
         curve.setData([t / 1000 for t in ts], mvs)
         p_v.setXRange(0, ts[-1] / 1000, padding=0.02)  # always fit the whole burst
         p_v.setTitle(f"Discharge curve (latest burst) | while charging: {charged} mV"
                      f" | {dt:.0f} µs/sample")
-        hist.setData(times)  # µs
 
     timer = QtCore.QTimer()
     timer.timeout.connect(update)

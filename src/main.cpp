@@ -87,6 +87,13 @@ void setup() {
 }
 
 void loop() {
+#if TOUCH_READ_TEST
+  // "T <value>": one hardware touch measurement per line.
+  pinMode(CHARGE_PIN, INPUT);  // high-Z: keep the RC resistor out of the way
+  Serial.printf("T %lu\n", (unsigned long)touchRead(SENSE_PIN));
+  delay(TOUCH_PERIOD_MS);
+  return;
+#endif
 #if DC_LEAK_TEST
   digitalWrite(CHARGE_PIN, HIGH);
   dcLeakTest();

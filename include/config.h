@@ -40,10 +40,20 @@
 #define R_SERIES_OHMS  1000000UL  // the resistor between CHARGE_PIN and the node
 #define V_HIGH_MV      3300       // CHARGE_PIN HIGH level (measure it with a multimeter)
 
+// ---- Built-in touch sensor test -------------------------------------------
+// 1 = use the ESP32-S3 hardware touch sensor: touchRead(SENSE_PIN) instead of
+//     the RC discharge. The plate only needs to be on SENSE_PIN (GPIO1..14);
+//     CHARGE_PIN is switched to high-Z so the resistor does not interfere.
+//     On ESP32-S3 the value goes UP when a finger touches.
+#define TOUCH_READ_TEST    1
+#define TOUCH_PERIOD_MS    10     // one touchRead() every N ms
+
 // ---- Serial ----------------------------------------------------------------
 #define SERIAL_BAUD 921600
 
 // ---- Sanity check ----------------------------------------------------------
 static_assert(SENSE_PIN >= 1 && SENSE_PIN <= 10,
               "SENSE_PIN must be an ADC1 pin (GPIO1..GPIO10 on ESP32-S3)");
+static_assert(!(DC_LEAK_TEST && TOUCH_READ_TEST),
+              "enable only one of DC_LEAK_TEST / TOUCH_READ_TEST");
 static_assert(SENSE_PIN != CHARGE_PIN, "SENSE_PIN and CHARGE_PIN must differ");
